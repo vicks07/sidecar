@@ -1,0 +1,6 @@
+{
+  "name": "subagent-panel",
+  "version": "0.1.0",
+  "description": "A side pane that lists this session's subagents, shows what each is doing and flags the ones that need you.",
+  "types": "./types/index.d.ts"
+}
