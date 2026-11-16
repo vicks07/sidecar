@@ -25,7 +25,15 @@ Claude Code 2.1.325 or later (`claude --version`). The mods API is early access 
 From a shell, in any folder:
 
 ```sh
-claude plugin marketplace add /Users/vikramt/Documents/Vikram/sidecar
+claude plugin marketplace add vicks07/sidecar
+claude plugin install subagent-panel@sidecar
+```
+
+To install from a clone instead, give the folder in place of `vicks07/sidecar`:
+
+```sh
+git clone https://github.com/vicks07/sidecar.git
+claude plugin marketplace add ./sidecar
 claude plugin install subagent-panel@sidecar
 ```
 
@@ -37,14 +45,14 @@ Check it is there:
 claude plugin list
 ```
 
-The entry shows `Read from: /Users/vikramt/Documents/Vikram/sidecar/subagent-panel`. The mod runs from this folder, not from a copy, so moving or deleting the folder breaks the install.
+When installed from a clone, the entry shows `Read from:` with the clone's `subagent-panel` folder. The mod then runs from that folder, not from a copy, so moving or deleting the folder breaks the install.
 
 ## Try it without installing
 
-Loads the mod for one session only:
+From a clone, this loads the mod for one session only:
 
 ```sh
-claude --plugin-dir /Users/vikramt/Documents/Vikram/sidecar/subagent-panel
+claude --plugin-dir ./sidecar/subagent-panel
 ```
 
 ## Use it
@@ -89,7 +97,9 @@ To check it works, type `/subagents`, then ask Claude: "Use a subagent to list t
 
 ## Update
 
-Edit the files in `subagent-panel/`. In a session where the mod is installed, run `/reload-plugins` or start a new session. No reinstall is needed.
+Installed from GitHub: `claude plugin marketplace update sidecar`, then `claude plugin update subagent-panel@sidecar`.
+
+Installed from a clone: edit or pull the files in `subagent-panel/`, then run `/reload-plugins` or start a new session. No reinstall is needed.
 
 ## Turn it off or uninstall
 
@@ -107,13 +117,15 @@ claude plugin uninstall subagent-panel@sidecar
 claude plugin marketplace remove sidecar
 ```
 
-Neither command deletes this folder.
+Neither command deletes a clone.
 
 ## Develop
 
+From the root of a clone:
+
 ```sh
-claude plugin validate /Users/vikramt/Documents/Vikram/sidecar
-claude plugin test /Users/vikramt/Documents/Vikram/sidecar/subagent-panel
+claude plugin validate .
+claude plugin test ./subagent-panel
 ```
 
 `validate` checks the marketplace file, the manifest and the hooks module. `test` runs `subagent-panel/tests/panel.test.tsx` on the terminal, desktop, VS Code and mobile surfaces.
