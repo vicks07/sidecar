@@ -1,0 +1,11 @@
+{
+  "name": "sidecar",
+  "owner": { "name": "Vikram T" },
+  "plugins": [
+    {
+      "name": "subagent-panel",
+      "source": "./subagent-panel",
+      "description": "A side pane that lists this session's subagents, shows what each is doing and flags the ones that need you."
+    }
+  ]
+}
