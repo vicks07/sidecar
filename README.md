@@ -8,6 +8,8 @@ Home of **subagent-panel**, a Claude Code mod that adds a side pane listing the 
 - An agent started by another agent is listed under it, stepped in.
 - From a selected agent you can view its transcript, send it your next message, or stop it. "New agent" starts a line in the prompt that asks Claude for one.
 
+![The pane: five agents, one listed under its parent, with the details of the selected agent below](docs/screenshots/details.png)
+
 | Folder | Contents |
 | --- | --- |
 | `subagent-panel/` | The mod: manifest, hooks module, state contract and tests |
