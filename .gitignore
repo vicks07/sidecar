@@ -1,0 +1,5 @@
+.DS_Store
+*.log
+# Written by Claude Code each time it loads the mod from this folder.
+subagent-panel/.claude-plugin/types/
+.mcpb-cache/
