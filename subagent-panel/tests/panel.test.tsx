@@ -22,7 +22,9 @@ const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
 
 // Nothing sits beneath the plugin in a test: each hook here stands for the
 // engine. Spawns are answered a1, a2, ... in the order they are made.
-const engine = (on: On) => {
+type StopAnswer = { result: unknown } | { deny: string }
+
+const engine = (on: On, taskStop?: (taskId: unknown) => StopAnswer) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   let spawned = 0
 
@@ -31,7 +33,12 @@ const engine = (on: On) => {
   on('ui.panes', () => ({ value: [] }))
   on('agent.list', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('tool.call', () => ({ result: {} }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('tool.call', (_, e) =>
+    e.tool === 'TaskStop' && taskStop !== undefined
+      ? taskStop(e.task_id)
+      : { result: {} },
+  )
   on('agent.spawn', () => {
     spawned += 1
 
@@ -395,4 +402,263 @@ test('auto mode: an ask goes to the classifier, not to you', async ($, on) => {
 
   expect(await flagged($)).toBe(false)
   expect(await modeLine($)).toContain('auto')
+})
+
+// ---- Nesting --------------------------------------------------------------
+
+const spawnUnder = ($: Engine, parentAgentId: string, description: string) =>
+  $.agent.spawn({
+    tool_use_id: `toolu_${description}`,
+    prompt: description,
+    description,
+    subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'opus',
+    background: false,
+    fork: false,
+    parentAgentId,
+  })
+
+test('an agent another agent started sits under it and lifts it when it needs you', async ($, on) => {
+  engine(on)
+  on('tool.check', () => ({ decision: 'ask' }))
+  await start($)
+  await spawn($, 'Explore', 'Parent job')
+  await spawnUnder($, 'a1', 'Child job')
+  await spawn($, 'Plan', 'Other job')
+  await $.tool.check({
+    tool: 'Edit',
+    input: { file_path: '/a.ts' },
+    tool_use_id: 'toolu_edit',
+    agentId: 'a2',
+    approver: 'person',
+  })
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const rows = (await ui.findAll({ type: 'Button' }))
+      .map(row => row.key)
+      .filter(key => key?.startsWith('row-'))
+
+    // The child needs you, so its parent's group comes before the newer agent.
+    expect(rows).toEqual(['row-a1', 'row-a2', 'row-a3'])
+    expect((await ui.find({ key: 'row-a2' }))?.text).toContain('└ ! Child job')
+    await ui.unmount()
+  }
+})
+
+// ---- Message, view, stop, new agent ---------------------------------------
+
+const BAND = {
+  plugin: 'subagent-panel',
+  component: 'AbovePrompt',
+  requestId: 'band',
+  props: {
+    hasSurvey: false,
+    isCollapsed: false,
+    isWorking: false,
+    maxRows: 4,
+    bodyColumns: 80,
+    scroll: { offset: 0, bodyRows: 4 },
+    view: {},
+  },
+} as const
+
+const typed = ($: Engine, text: string) =>
+  $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+
+test('Message sends the next typed prompt to the agent, once', async ($, on) => {
+  engine(on)
+  const sent: Array<{ to: string; text: string }> = []
+  on('session.send', (_, e) => {
+    sent.push({ to: e.to, text: e.text })
+
+    return { isDelivered: true }
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('prompt.fill', () => ({ isFilled: true }))
+  await start($)
+  await spawn($, 'code-reviewer', 'Reviewing the login flow')
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'row-a1' })
+  await pane.press({ key: 'act-message' })
+  expect((await pane.find({ key: 'act-message' }))?.text).toContain('Cancel message')
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(
+    await band.find({ type: 'Text', text: 'sending to Reviewing the login flow' }),
+  ).toBeDefined()
+  expect(await band.find({ key: 'back-to-main' })).toBeDefined()
+
+  // A slash command is never redirected.
+  const command = await $.prompt.submit({
+    text: '/help',
+    command: { name: 'help', args: '' },
+    wait: false,
+    origin: { kind: 'composer' },
+  })
+  expect(command.drop).toBeUndefined()
+  expect(sent).toHaveLength(0)
+
+  const first = await typed($, 'go ahead, but keep the old cookie name')
+  expect(first.drop).toContain('Sent to Reviewing the login flow')
+  expect(sent).toHaveLength(1)
+  expect(sent[0]?.text).toBe('go ahead, but keep the old cookie name')
+  expect(sent[0]?.to).toContain('a1')
+
+  // One message only: the next one is main Claude's again.
+  const second = await typed($, 'and now you, Claude')
+  expect(second.drop).toBeUndefined()
+  expect(second.text).toBe('and now you, Claude')
+  expect(sent).toHaveLength(1)
+  expect(await band.find({ type: 'Text', text: /sending to/ })).toBeUndefined()
+
+  await band.unmount()
+  await pane.unmount()
+})
+
+test('a message that is not delivered is reported, not lost', async ($, on) => {
+  engine(on)
+  const filled: string[] = []
+  on('session.send', () => ({ isDelivered: false, reason: 'the agent has ended' }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('prompt.fill', (_, e) => {
+    filled.push(e.text)
+
+    return { isFilled: true }
+  })
+  await start($)
+  await spawn($, 'Explore', 'Searching')
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'row-a1' })
+  await pane.press({ key: 'act-message' })
+
+  const result = await typed($, 'one more thing')
+  expect(result.drop).toContain('Not delivered to Searching: the agent has ended')
+  expect(filled).toEqual(['one more thing'])
+  await pane.unmount()
+})
+
+test('Back to main Claude clears the target', async ($, on) => {
+  engine(on)
+  const views: unknown[] = []
+  on('ui.view', (_, e) => {
+    views.push(e)
+
+    return { value: {} }
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  await start($)
+  await spawn($, 'Explore', 'Searching')
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'row-a1' })
+  await pane.press({ key: 'act-message' })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await band.press({ key: 'back-to-main' })
+
+  expect(await band.find({ type: 'Text', text: /sending to/ })).toBeUndefined()
+  expect((await typed($, 'hello')).text).toBe('hello')
+  expect(views).toEqual([{}])
+  await band.unmount()
+  await pane.unmount()
+})
+
+test('View transcript asks the engine to show the agent', async ($, on) => {
+  engine(on)
+  const views: unknown[] = []
+  on('ui.view', (_, e) => {
+    views.push(e)
+
+    return { value: {} }
+  })
+  await start($)
+  await spawn($, 'Explore', 'Searching')
+
+  for (const surface of SURFACES) {
+    const pane = await $.ui.mount({ ...PANE, surface })
+    await pane.press({ key: 'row-a1' })
+    await pane.press({ key: 'act-view' })
+    await pane.press({ key: 'row-a1' })
+    await pane.unmount()
+  }
+
+  expect(views).toEqual(SURFACES.map(() => ({ agentId: 'a1' })))
+
+  // While an agent's transcript is the view, the band says where typing goes.
+  const band = await $.ui.mount({
+    ...BAND,
+    props: { ...BAND.props, view: { agentId: 'a1' } },
+    surface: 'terminal',
+  })
+  expect(
+    await band.find({ type: 'Text', text: /viewing Searching: messages go to this agent/ }),
+  ).toBeDefined()
+  await band.unmount()
+})
+
+test('Stop asks first, then stops the agent with TaskStop', async ($, on) => {
+  const stops: unknown[] = []
+  engine(on, taskId => {
+    stops.push(taskId)
+
+    return { result: { message: 'stopped', task_id: 'a1', task_type: 'subagent' } }
+  })
+  await start($)
+  await spawn($, 'Explore', 'Searching')
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'row-a1' })
+  expect(await pane.find({ key: 'stop-yes' })).toBeUndefined()
+
+  // Cancel leaves it running.
+  await pane.press({ key: 'act-stop' })
+  await pane.press({ key: 'stop-no' })
+  expect(stops).toHaveLength(0)
+  expect(await pane.find({ type: 'Text', text: '1 working' })).toBeDefined()
+
+  await pane.press({ key: 'act-stop' })
+  expect(await pane.find({ type: 'Text', text: 'Stop this agent?' })).toBeDefined()
+  await pane.press({ key: 'stop-yes' })
+
+  expect(stops).toEqual(['a1'])
+  expect(await pane.find({ type: 'Text', text: '1 stopped' })).toBeDefined()
+  // An ended agent has no Stop.
+  expect(await pane.find({ key: 'act-stop' })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('a refused stop leaves the agent as it was', async ($, on) => {
+  engine(on, () => ({ deny: 'not a background task' }))
+  await start($)
+  await spawn($, 'Explore', 'Searching')
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'row-a1' })
+  await pane.press({ key: 'act-stop' })
+  await pane.press({ key: 'stop-yes' })
+
+  expect(await pane.find({ type: 'Text', text: '1 working' })).toBeDefined()
+  await pane.unmount()
+})
+
+test('New agent starts the one line in the prompt', async ($, on) => {
+  engine(on)
+  const filled: string[] = []
+  on('prompt.fill', (_, e) => {
+    filled.push(e.text)
+
+    return { isFilled: true }
+  })
+  await start($)
+
+  for (const surface of SURFACES) {
+    const pane = await $.ui.mount({ ...PANE, surface })
+    await pane.press({ key: 'new-agent' })
+    await pane.unmount()
+  }
+
+  expect(filled).toEqual(SURFACES.map(() => 'Use a subagent to '))
 })

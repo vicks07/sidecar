@@ -6,8 +6,9 @@
 //      and turn ends, and only ever pass `next(e)` on unchanged
 //   c) the pane: a ui.render hook that draws the list from the store
 //
-// This version is read-only (build steps 1 to 6): nothing here changes what
-// any agent does. Message, stop and new agent come after it.
+// The collectors only observe: they pass `next(e)` on unchanged. What acts on
+// an agent is what the person presses or types: view transcript, message, stop
+// and new agent, each at the bottom of this file's helpers.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -35,6 +36,7 @@ import {
   sorted,
   sublabel,
   summaryLine,
+  tree,
   upsert,
   withAction,
   working,
@@ -44,8 +46,10 @@ const PANE = 'subagents'
 const TITLE = 'Subagents'
 const EMPTY = 'No subagents yet. Ask Claude to use subagents for a task.'
 const BRIEF = 600
+const NEW_AGENT = 'Use a subagent to '
 const USAGE =
-  'Usage: /subagents (toggle the pane), /subagents list, /subagents show <name>'
+  'Usage: /subagents (toggle the pane) · list · show <name> · view <name> · ' +
+  'message <name> <text> · stop <name> · new <job> · main'
 
 // Change the tag when PanelAgent's fields change: it declines what an earlier
 // version stored, which outlives a reload.
@@ -57,6 +61,12 @@ const now = atom({ plugin: 'subagent-panel', key: 'now' } as const, 0)
 const isFinishedOpen = atom(
   { plugin: 'subagent-panel', key: 'isFinishedOpen' } as const,
   false,
+)
+
+const target = atom({ plugin: 'subagent-panel', key: 'target' } as const, null)
+const confirming = atom(
+  { plugin: 'subagent-panel', key: 'confirming' } as const,
+  null,
 )
 
 const COLOR: Record<PanelStatus, string | undefined> = {
@@ -98,6 +108,7 @@ const known = async (
         type: info.type,
         task: info.description,
         ...(info.name !== undefined ? { name: info.name } : {}),
+        ...(info.parentId !== undefined ? { parentId: info.parentId } : {}),
       }
 }
 
@@ -153,12 +164,106 @@ const tick = async ($: EngineInterface): Promise<void> => {
 const open = ($: EngineInterface) =>
   $.ui.open({ id: PANE, title: TITLE, columns: 48 })
 
+const why = (error: unknown): string =>
+  error instanceof Error ? error.message : 'the engine refused it'
+
+/** Puts an agent's transcript in the main view; a toast says why not. */
+const viewAgent = async ($: EngineInterface, agent: PanelAgent): Promise<void> => {
+  try {
+    const shown = await $.ui.view({ agentId: agent.id })
+
+    if (shown.deny !== undefined) {
+      $.ui.toast(`Cannot show ${clip(label(agent), 30)}: ${shown.deny}`)
+    }
+  } catch (error) {
+    $.ui.toast(`Cannot show ${clip(label(agent), 30)}: ${why(error)}`)
+  }
+}
+
+/** Typing goes to main Claude again, and the main view shows it. */
+const backToMain = async ($: EngineInterface): Promise<void> => {
+  await update($, target, () => null)
+
+  try {
+    await $.ui.view({})
+  } catch {
+    // No main view to switch: the target is cleared all the same.
+  }
+}
+
+/** Sends one message to an agent; resolves why it was not delivered, if so. */
+const sendTo = async (
+  $: EngineInterface,
+  agent: PanelAgent,
+  text: string,
+): Promise<string | undefined> => {
+  try {
+    const sent = await $.session.send({ to: { agentId: agent.id }, text })
+
+    return sent.isDelivered ? undefined : sent.reason
+  } catch (error) {
+    return why(error)
+  }
+}
+
+/** Stops an agent with the TaskStop tool; resolves why it did not stop, if so. */
+const stopAgent = async (
+  $: EngineInterface,
+  agent: PanelAgent,
+): Promise<string | undefined> => {
+  try {
+    const ran = await $.tool.call({
+      tool: 'TaskStop',
+      task_id: agent.id,
+      consent: `The user pressed "Yes, stop" for the subagent "${label(agent)}" in the subagent panel.`,
+    })
+
+    if (ran.deny !== undefined) {
+      return ran.deny
+    }
+
+    if (ran.isError === true) {
+      return ran.text ?? 'TaskStop reported an error'
+    }
+
+    const at = await $.clock.now()
+    await update($, agents, list =>
+      patch(list, agent.id, one =>
+        isFinished(one) ? one : finished(one, 'stopped', at),
+      ),
+    )
+
+    return undefined
+  } catch (error) {
+    return why(error)
+  }
+}
+
+const confirmStop = async ($: EngineInterface, agent: PanelAgent): Promise<string> => {
+  await update($, confirming, () => null)
+  const failure = await stopAgent($, agent)
+  const name = clip(label(agent), 30)
+
+  return failure === undefined
+    ? `Stopped ${name}.`
+    : `Could not stop ${name}: ${failure}`
+}
+
+/** Starts the one line that asks main Claude for a new agent. */
+const startNew = async ($: EngineInterface): Promise<void> => {
+  const filled = await $.prompt.fill({ text: NEW_AGENT })
+
+  if (!filled.isFilled) {
+    $.ui.toast(`Type "${NEW_AGENT}…" in the prompt to start one.`)
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'subagents',
       description: 'Show or hide the subagent panel',
-      argumentHint: '[list | show <name>]',
+      argumentHint: '[list | show|view|stop <name> | message <name> <text> | new <job> | main]',
     })
     $.clock.every(1000, () => {
       void quietly(() => tick($))
@@ -184,6 +289,7 @@ export const register: Register = on => {
           scope: scopeOf(e.provider),
           ...(e.permissionMode !== undefined ? { mode: e.permissionMode } : {}),
           ...(e.name !== undefined ? { name: e.name } : {}),
+          ...(e.parentAgentId !== undefined ? { parentId: e.parentAgentId } : {}),
           ...(started.model !== undefined ? { model: started.model } : {}),
         }
 
@@ -340,6 +446,76 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // ---- Messaging -------------------------------------------------------
+
+  // One input box: while an agent is the target, the next typed message goes
+  // to it instead of main Claude, and the target goes back to main Claude.
+  on('prompt.submit', async ($, e, next) => {
+    const id = await read($, target)
+
+    if (
+      id === null ||
+      e.origin.kind !== 'composer' ||
+      e.command !== undefined ||
+      e.isMeta === true ||
+      e.text.trim() === ''
+    ) {
+      return next(e)
+    }
+
+    await update($, target, () => null)
+    const agent = (await read($, agents)).find(one => one.id === id)
+
+    if (agent === undefined) {
+      return next(e)
+    }
+
+    const name = clip(label(agent), 30)
+    const failure = await sendTo($, agent, e.text)
+
+    if (failure === undefined) {
+      return { drop: `Sent to ${name}. Typing goes to main Claude again.` }
+    }
+
+    void $.prompt.fill({ text: e.text }).catch(() => undefined)
+
+    return {
+      drop: `Not delivered to ${name}: ${failure}. Your message is back in the prompt.`,
+    }
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) {
+      return next(e)
+    }
+
+    const list = await read($, agents)
+    const id = await read($, target)
+    const sending = list.find(agent => agent.id === id)
+    const viewing = list.find(agent => agent.id === e.props.view.agentId)
+    const agent = sending ?? viewing
+
+    if (agent === undefined) {
+      return next(e)
+    }
+
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const name = clip(label(agent), Math.max(12, e.props.bodyColumns - 42))
+
+    return (
+      <Box columnGap={2} flexWrap="wrap">
+        <Text color="suggestion">
+          {sending !== undefined
+            ? `sending to ${name}`
+            : `viewing ${name}: messages go to this agent`}
+        </Text>
+        <Button key="back-to-main" onPress={() => backToMain($)}>
+          Back to main Claude
+        </Button>
+      </Box>
+    )
+  })
+
   // ---- Command ----------------------------------------------------------
 
   on('command.run', { command: 'subagents' }, async ($, e) => {
@@ -393,6 +569,78 @@ export const register: Register = on => {
       return { text: `Showing ${label(found)} in the subagent panel.` }
     }
 
+    if (verb === 'main') {
+      await backToMain($)
+
+      return { text: 'Typing goes to main Claude.' }
+    }
+
+    if (verb === 'new') {
+      const job = rest.join(' ')
+
+      if (job === '') {
+        return { text: 'Say what the agent should do: /subagents new <job>' }
+      }
+
+      void $.prompt.submit({ text: `${NEW_AGENT}${job}`, asUser: true })
+
+      return { text: `Asked Claude to start a subagent: ${job}` }
+    }
+
+    if (verb === 'view' || verb === 'stop' || verb === 'message') {
+      const isSure = verb === 'stop' && rest.at(-1) === 'yes'
+      const words = isSure ? rest.slice(0, -1) : rest
+      const query = verb === 'message' ? (words[0] ?? '') : words.join(' ')
+      const found = findByName(list, query)
+
+      if (found === undefined) {
+        return { text: `No subagent named "${query}". ${USAGE}` }
+      }
+
+      const name = label(found)
+
+      if (verb === 'view') {
+        await viewAgent($, found)
+
+        return { text: `Showing ${name}. /subagents main goes back.` }
+      }
+
+      if (verb === 'message') {
+        const text = words.slice(1).join(' ')
+
+        if (text === '') {
+          await update($, target, () => found.id)
+
+          return { text: `Your next message goes to ${name}.` }
+        }
+
+        const failure = await sendTo($, found, text)
+
+        return {
+          text:
+            failure === undefined
+              ? `Sent to ${name}.`
+              : `Not delivered to ${name}: ${failure}`,
+        }
+      }
+
+      if (isFinished(found)) {
+        return { text: `${name} has already ended.` }
+      }
+
+      if (!isSure) {
+        await update($, selected, () => found.id)
+        await update($, confirming, () => found.id)
+        await open($)
+
+        return {
+          text: `Stop ${name}? Press "Yes, stop" in the panel, or run /subagents stop ${query} yes`,
+        }
+      }
+
+      return { text: await confirmStop($, found) }
+    }
+
     return { text: USAGE }
   })
 
@@ -400,34 +648,45 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
-    const list = sorted(await read($, agents))
+    const list = await read($, agents)
+    const placed = tree(list)
     const picked = await read($, selected)
     const at = await read($, now)
     const isOpen = await read($, isFinishedOpen)
+    const sendingTo = await read($, target)
+    const asking = await read($, confirming)
     const isTerminal = e.surface === 'terminal'
     // A card's border and padding take four cells of the body.
     const columns = Math.max(12, e.props.bodyColumns - (isTerminal ? 0 : 4))
 
-    const done = list.filter(isFinished)
+    // An agent is put away only once it and all it started have ended.
+    const done = placed.filter(one => one.isSettled)
     const isCollapsible = done.length > COLLAPSE_OVER
-    const shown = isCollapsible && !isOpen ? list.filter(isActive) : list
+    const shown =
+      isCollapsible && !isOpen ? placed.filter(one => !one.isSettled) : placed
     const detail = list.find(agent => agent.id === picked)
 
-    const select = (id: string) => () =>
-      update($, selected, current => (current === id ? null : id))
+    const select = (id: string) => async () => {
+      await update($, confirming, () => null)
+      await update($, selected, current => (current === id ? null : id))
+    }
 
     const right = (agent: PanelAgent): string =>
       agent.status === 'working' ? runtime(agent, at) : WORD[agent.status]
 
-    const row = (agent: PanelAgent) => {
+    const row = ({ agent, depth }: { agent: PanelAgent; depth: number }) => {
       const isPicked = agent.id === picked
       const color = COLOR[agent.status]
       const side = right(agent)
+      // An agent another agent started sits under it, stepped in.
+      const step = Math.min(depth, 3)
+      const indent = step === 0 ? '' : `${'  '.repeat(step - 1)}└ `
+      const pad = ' '.repeat(indent.length)
       // The row also holds the mark, a space, a gap and, on the terminal, the
       // selection bar.
       const name = clip(
         label(agent),
-        Math.max(8, columns - side.length - (isTerminal ? 4 : 3)),
+        Math.max(8, columns - side.length - indent.length - (isTerminal ? 4 : 3)),
       )
       const second = sublabel(agent)
 
@@ -435,10 +694,12 @@ export const register: Register = on => {
         <Box justifyContent="space-between">
           <Button key={`row-${agent.id}`} plain onPress={select(agent.id)}>
             {isTerminal ? (isPicked ? '▌' : ' ') : ''}
+            {indent === '' ? '' : <Text dimColor>{indent}</Text>}
             <Text {...(color ? { color } : {})} dimColor={isFinished(agent)}>
               {MARK[agent.status]}
             </Text>{' '}
             <Text weight={isPicked ? 'bold' : 'regular'}>{name}</Text>
+            {agent.id === sendingTo ? <Text color="suggestion"> ←</Text> : ''}
           </Button>
           <Text {...(color ? { color } : {})} dimColor={color === undefined}>
             {side}
@@ -448,6 +709,7 @@ export const register: Register = on => {
       const task = (
         <Text dimColor wrap="truncate-end">
           {isTerminal ? '   ' : ''}
+          {pad}
           {second}
         </Text>
       )
@@ -560,8 +822,74 @@ export const register: Register = on => {
                 <Text wrap="wrap">  {detail.result}</Text>
               </Box>
             )}
+            <Text> </Text>
+            {asking === detail.id ? (
+              <Box columnGap={2} flexWrap="wrap">
+                <Text color="warning">Stop this agent?</Text>
+                <Button
+                  key="stop-yes"
+                  plain
+                  hotkey="y"
+                  onPress={async () => {
+                    $.ui.toast(await confirmStop($, detail))
+                  }}
+                >
+                  Yes, stop
+                </Button>
+                <Button
+                  key="stop-no"
+                  plain
+                  hotkey="c"
+                  onPress={() => update($, confirming, () => null)}
+                >
+                  Cancel
+                </Button>
+              </Box>
+            ) : (
+              <Box columnGap={2} flexWrap="wrap">
+                <Button
+                  key="act-view"
+                  plain
+                  hotkey="v"
+                  onPress={() => viewAgent($, detail)}
+                >
+                  View transcript
+                </Button>
+                <Button
+                  key="act-message"
+                  plain
+                  hotkey="m"
+                  onPress={() =>
+                    update($, target, current =>
+                      current === detail.id ? null : detail.id,
+                    )
+                  }
+                >
+                  {sendingTo === detail.id ? 'Cancel message' : 'Message'}
+                </Button>
+                {isActive(detail) && (
+                  <Button
+                    key="act-stop"
+                    plain
+                    hotkey="s"
+                    onPress={() => update($, confirming, () => detail.id)}
+                  >
+                    Stop
+                  </Button>
+                )}
+              </Box>
+            )}
+            {sendingTo === detail.id && (
+              <Text color="suggestion" wrap="wrap">
+                Your next message goes to this agent. Type it in the prompt.
+              </Text>
+            )}
           </Box>
         )}
+        <Text> </Text>
+        <Button key="new-agent" plain hotkey="n" onPress={() => startNew($)}>
+          New agent
+        </Button>
         {list.length > 0 && isTerminal && (
           <Text dimColor>
             {e.props.isFocused

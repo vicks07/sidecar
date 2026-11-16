@@ -5,6 +5,8 @@ export type PanelAgent = {
   id: string
   /** The agent type it was spawned as (`Explore`, `general-purpose`, ...). */
   type: string
+  /** The agent whose loop spawned it; absent when the main loop did. */
+  parentId?: string
   /** What SendMessage addresses it by, when the spawn named it. */
   name?: string
   /** The task in one line: the short description the spawn gave. */
@@ -43,6 +45,10 @@ declare module 'claude-code' {
       selected: string | null
       now: number
       isFinishedOpen: boolean
+      /** The agent the next typed message goes to; null for main Claude. */
+      target: string | null
+      /** The agent whose stop waits on a yes. */
+      confirming: string | null
     }
   }
 }

@@ -5,8 +5,8 @@ Home of **subagent-panel**, a Claude Code mod that adds a side pane listing the 
 - Each row shows what the agent was asked to do, its status, how long it has run and its latest action.
 - Agents waiting on a permission are flagged `!` "needs you" and sorted to the top.
 - Selecting a row shows details: type, model, tools used, permission mode, the brief it was given, recent actions and its result.
-
-This version is read-only. It does not message, stop or start agents.
+- An agent started by another agent is listed under it, stepped in.
+- From a selected agent you can view its transcript, send it your next message, or stop it. "New agent" starts a line in the prompt that asks Claude for one.
 
 | Folder | Contents |
 | --- | --- |
@@ -52,6 +52,14 @@ claude --plugin-dir /Users/vikramt/Documents/Vikram/sidecar/subagent-panel
 | `/subagents` | Show or hide the pane |
 | `/subagents list` | Print the agents as text |
 | `/subagents show <name>` | Open the pane on one agent's details |
+| `/subagents view <name>` | Show that agent's transcript in the main view |
+| `/subagents message <name>` | Send your next typed message to that agent |
+| `/subagents message <name> <text>` | Send that text to the agent now |
+| `/subagents stop <name>` | Ask to stop the agent; add `yes` to confirm |
+| `/subagents new <job>` | Ask Claude to start a subagent for the job |
+| `/subagents main` | Go back to main Claude after `view` or `message` |
+
+`<name>` is the agent's name, its type, or the start of its row title.
 
 The pane also opens by itself when the first subagent starts, on a terminal at least 144 columns wide. On a narrower terminal, use `/subagents`.
 
@@ -60,7 +68,14 @@ The pane also opens by itself when the first subagent starts, on a terminal at l
 | `ctrl+x` then `tab` | Give the pane the keyboard |
 | `tab` | Move between rows |
 | `enter` or a click | Show or hide an agent's details |
+| `v`, `m`, `s` | With an agent's details open: view transcript, message, stop |
+| `y`, `c` | Confirm or cancel a stop |
+| `n` | New agent |
 | `esc` | Return to the prompt |
+
+**Messaging.** There is one input box. After you choose Message, a line above the prompt reads "sending to <agent>", with a "Back to main Claude" button. The next message you type goes to that agent only, and a line reports whether it was delivered. After that one message, typing goes to main Claude again. Slash commands are never redirected.
+
+**Stopping.** Stop always asks first. It uses Claude Code's TaskStop tool, which may refuse an agent that is not a background or named agent; the panel then says why and leaves the agent running.
 
 To check it works, type `/subagents`, then ask Claude: "Use a subagent to list the files in this folder."
 
@@ -97,7 +112,7 @@ claude plugin test /Users/vikramt/Documents/Vikram/sidecar/subagent-panel
 
 | File | Contents |
 | --- | --- |
-| `subagent-panel/hooks/register.tsx` | The collectors (spawn, tool call, permission check, turn end), the `/subagents` command and the pane |
+| `subagent-panel/hooks/register.tsx` | The collectors (spawn, tool call, permission check, turn end), message routing, the `/subagents` command, the pane and the line above the prompt |
 | `subagent-panel/hooks/store.ts` | The agent store's pure functions: updates, sort order, labels |
 | `subagent-panel/types/index.d.ts` | The shape of the stored values |
 | `subagent-panel/tests/panel.test.tsx` | The tests |

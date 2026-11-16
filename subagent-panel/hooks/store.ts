@@ -147,6 +147,64 @@ export const sorted = (list: readonly PanelAgent[]): PanelAgent[] =>
         : b.startedAt - a.startedAt),
   )
 
+export type Placed = {
+  agent: PanelAgent
+  /** 0 for an agent the main loop started, 1 for one it started, and so on. */
+  depth: number
+  /** True when it and everything it started, or its ancestors did, has ended. */
+  isSettled: boolean
+}
+
+/**
+ * The list as the pane draws it: each agent followed by the agents it started.
+ * A group is ordered by the most urgent status anywhere inside it, so an agent
+ * that needs you lifts the agent that started it to the top with it.
+ */
+export const tree = (list: readonly PanelAgent[]): Placed[] => {
+  const ids = new Set(list.map(agent => agent.id))
+  const childrenOf = (id: string) => list.filter(agent => agent.parentId === id)
+  const within = (agent: PanelAgent, seen: Set<string>): PanelAgent[] => {
+    if (seen.has(agent.id)) {
+      return []
+    }
+
+    seen.add(agent.id)
+
+    return [agent, ...childrenOf(agent.id).flatMap(child => within(child, seen))]
+  }
+  const urgency = (agent: PanelAgent): number =>
+    Math.min(...within(agent, new Set()).map(one => RANK[one.status]))
+  const order = (group: PanelAgent[]): PanelAgent[] =>
+    sorted(group)
+      .map((agent, index) => ({ agent, index, rank: urgency(agent) }))
+      .sort((a, b) => a.rank - b.rank || a.index - b.index)
+      .map(one => one.agent)
+
+  const placed: Placed[] = []
+  const seen = new Set<string>()
+  const walk = (agent: PanelAgent, depth: number, isSettled: boolean) => {
+    if (seen.has(agent.id)) {
+      return
+    }
+
+    seen.add(agent.id)
+    placed.push({ agent, depth, isSettled })
+
+    for (const child of order(childrenOf(agent.id))) {
+      walk(child, depth + 1, isSettled)
+    }
+  }
+  const roots = list.filter(
+    agent => agent.parentId === undefined || !ids.has(agent.parentId),
+  )
+
+  for (const root of order(roots)) {
+    walk(root, 0, within(root, new Set()).every(isFinished))
+  }
+
+  return placed
+}
+
 export const MARK: Record<PanelStatus, string> = {
   'needs-you': '!',
   working: '●',
