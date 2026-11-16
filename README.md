@@ -77,7 +77,13 @@ The pane also opens by itself when the first subagent starts, on a terminal at l
 
 **Messaging.** There is one input box. After you choose Message, a line above the prompt reads "sending to <agent>", with a "Back to main Claude" button. The next message you type goes to that agent only, and a line reports whether it was delivered. After that one message, typing goes to main Claude again. Slash commands are never redirected.
 
+![The line above the prompt: sending to Slow read-only demo child, with a Back to main Claude button](docs/screenshots/sending-to.png)
+
+![The pane after choosing Message: the row is marked with an arrow and the details say the next message goes to this agent](docs/screenshots/message.png)
+
 **Stopping.** Stop always asks first. It uses Claude Code's TaskStop tool, which may refuse an agent that is not a background or named agent; the panel then says why and leaves the agent running.
+
+![The pane asking "Stop this agent?" with keys for yes and cancel](docs/screenshots/stop.png)
 
 To check it works, type `/subagents`, then ask Claude: "Use a subagent to list the files in this folder."
 
